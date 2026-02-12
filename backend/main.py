@@ -1,103 +1,77 @@
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr
-from datetime import datetime, timedelta, timezone
-from typing import Optional, List, Literal
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from datetime import datetime
+import jwt
+import hashlib
+import os
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Index
-from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
+# ================= DATABASE =================
 
-from passlib.context import CryptContext
-from jose import jwt, JWTError
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./esnaf_defteri.db")
 
-# ---------- CONFIG ----------
-IST = timezone(timedelta(hours=3))
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-JWT_SECRET = "CHANGE_ME_SUPER_SECRET"
-JWT_ALG = "HS256"
-TOKEN_EXPIRE_DAYS = 30
-
-# Kalıcı dosya: backend klasöründe esnaf_defteri.db
-DATABASE_URL = "sqlite:///./esnaf_defteri.db"
-
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {})
+SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# ================= JWT =================
 
+SECRET_KEY = "UMUT_SECRET_2026"
+ALGORITHM = "HS256"
 
-# ---------- DB MODELS ----------
+# ================= MODELS =================
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    password_hash = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(IST))
-
-    transactions = relationship("Transaction", back_populates="user")
-
+    email = Column(String, unique=True)
+    password = Column(String)
 
 class Transaction(Base):
     __tablename__ = "transactions"
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-
-    title = Column(String, nullable=False)
-    amount = Column(Float, nullable=False)
-    type = Column(String, nullable=False)  # income | expense
-
-    created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(IST), index=True)
-
-    user = relationship("User", back_populates="transactions")
-
-
-Index("ix_transactions_user_created", Transaction.user_id, Transaction.created_at)
+    title = Column(String)
+    amount = Column(Float)
+    type = Column(String)  # income / expense
+    created_at = Column(DateTime, default=datetime.utcnow)
+    user_id = Column(Integer)
 
 Base.metadata.create_all(bind=engine)
 
+# ================= SCHEMAS =================
 
-# ---------- SCHEMAS ----------
-class RegisterIn(BaseModel):
-    email: EmailStr
+class RegisterSchema(BaseModel):
+    email: str
     password: str
 
-
-class LoginIn(BaseModel):
-    email: EmailStr
+class LoginSchema(BaseModel):
+    email: str
     password: str
 
-
-class TokenOut(BaseModel):
-    token: str
-
-
-class TxCreateIn(BaseModel):
+class TxSchema(BaseModel):
     title: str
     amount: float
-    type: Literal["income", "expense"]
+    type: str
 
+# ================= APP =================
 
-class TxOut(BaseModel):
-    id: int
-    title: str
-    amount: float
-    type: Literal["income", "expense"]
-    created_at: datetime
+app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-class SummaryOut(BaseModel):
-    ana_kasa: float
-    aylik_kasa: float
-    month: str
-    income_total: float
-    expense_total: float
+# ================= DB DEP =================
 
-
-# ---------- UTILS ----------
 def get_db():
     db = SessionLocal()
     try:
@@ -105,168 +79,94 @@ def get_db():
     finally:
         db.close()
 
+# ================= AUTH =================
 
-def hash_password(pw: str) -> str:
-    return pwd_context.hash(pw)
+def hash_password(pw: str):
+    return hashlib.sha256(pw.encode()).hexdigest()
 
+def create_token(user_id: int):
+    return jwt.encode({"user_id": user_id}, SECRET_KEY, algorithm=ALGORITHM)
 
-def verify_password(pw: str, hashed: str) -> bool:
-    return pwd_context.verify(pw, hashed)
+def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)):
+    if not authorization:
+        raise HTTPException(status_code=401, detail="No token")
 
-
-def create_token(user_id: int) -> str:
-    exp = datetime.now(IST) + timedelta(days=TOKEN_EXPIRE_DAYS)
-    payload = {"sub": str(user_id), "exp": exp}
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALG)
-
-
-def get_current_user_id(authorization: Optional[str] = Header(None), db: Session = Depends(get_db)) -> int:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing Authorization Bearer token")
-    token = authorization.replace("Bearer ", "").strip()
-
+    token = authorization.replace("Bearer ", "")
     try:
-        data = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
-        user_id = int(data.get("sub"))
-    except JWTError:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user = db.query(User).filter(User.id == payload["user_id"]).first()
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        return user
+    except:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return user_id
+# ================= ROUTES =================
 
+@app.post("/auth/register")
+def register(data: RegisterSchema, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.email == data.email).first():
+        raise HTTPException(status_code=400, detail="User exists")
 
-# ---------- APP ----------
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.get("/")
-def root():
-    return {"status": "Backend çalışıyor 🚀"}
-
-
-# ---------- AUTH ----------
-@app.post("/auth/register", response_model=TokenOut)
-def register(payload: RegisterIn, db: Session = Depends(get_db)):
-    exists = db.query(User).filter(User.email == payload.email).first()
-    if exists:
-        raise HTTPException(status_code=400, detail="Bu email zaten kayıtlı")
-
-    u = User(email=payload.email, password_hash=hash_password(payload.password))
-    db.add(u)
+    user = User(
+        email=data.email,
+        password=hash_password(data.password)
+    )
+    db.add(user)
     db.commit()
-    db.refresh(u)
-    return {"token": create_token(u.id)}
+    db.refresh(user)
 
+    return {"token": create_token(user.id)}
 
-@app.post("/auth/login", response_model=TokenOut)
-def login(payload: LoginIn, db: Session = Depends(get_db)):
-    u = db.query(User).filter(User.email == payload.email).first()
-    if not u or not verify_password(payload.password, u.password_hash):
-        raise HTTPException(status_code=401, detail="Hatalı email/şifre")
-    return {"token": create_token(u.id)}
+@app.post("/auth/login")
+def login(data: LoginSchema, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == data.email).first()
+    if not user or user.password != hash_password(data.password):
+        raise HTTPException(status_code=401, detail="Wrong credentials")
 
+    return {"token": create_token(user.id)}
 
-# ---------- TRANSACTIONS ----------
-@app.post("/transactions", response_model=TxOut)
-def create_tx(payload: TxCreateIn, user_id: int = Depends(get_current_user_id), db: Session = Depends(get_db)):
+@app.post("/transactions")
+def create_tx(data: TxSchema, user=Depends(get_current_user), db: Session = Depends(get_db)):
     tx = Transaction(
-        user_id=user_id,
-        title=payload.title.strip(),
-        amount=float(payload.amount),
-        type=payload.type,
-        created_at=datetime.now(IST),  # ✅ otomatik tarih-saat
+        title=data.title,
+        amount=data.amount,
+        type=data.type,
+        user_id=user.id,
+        created_at=datetime.utcnow()
     )
     db.add(tx)
     db.commit()
     db.refresh(tx)
-    return TxOut(id=tx.id, title=tx.title, amount=tx.amount, type=tx.type, created_at=tx.created_at)
+    return tx
 
-
-@app.get("/transactions", response_model=List[TxOut])
-def list_txs(
-    user_id: int = Depends(get_current_user_id),
-    db: Session = Depends(get_db),
-    start: Optional[str] = None,  # YYYY-MM-DD
-    end: Optional[str] = None,    # YYYY-MM-DD
-    limit: int = 500,
-):
-    q = db.query(Transaction).filter(Transaction.user_id == user_id)
-
-    if start:
-        s = datetime.fromisoformat(start).replace(tzinfo=IST)
-        q = q.filter(Transaction.created_at >= s)
-    if end:
-        e = datetime.fromisoformat(end).replace(tzinfo=IST) + timedelta(days=1)
-        q = q.filter(Transaction.created_at < e)
-
-    items = q.order_by(Transaction.created_at.desc()).limit(limit).all()
-    return [TxOut(id=t.id, title=t.title, amount=t.amount, type=t.type, created_at=t.created_at) for t in items]
-
+@app.get("/transactions")
+def list_tx(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    return db.query(Transaction).filter(Transaction.user_id == user.id).order_by(Transaction.id.desc()).all()
 
 @app.delete("/transactions/{tx_id}")
-def delete_tx(tx_id: int, user_id: int = Depends(get_current_user_id), db: Session = Depends(get_db)):
-    tx = db.query(Transaction).filter(Transaction.id == tx_id, Transaction.user_id == user_id).first()
+def delete_tx(tx_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
+    tx = db.query(Transaction).filter(Transaction.id == tx_id, Transaction.user_id == user.id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Kayıt bulunamadı")
+        raise HTTPException(status_code=404, detail="Not found")
+
     db.delete(tx)
     db.commit()
     return {"ok": True}
 
+@app.get("/summary")
+def summary(user=Depends(get_current_user), db: Session = Depends(get_db)):
+    txs = db.query(Transaction).filter(Transaction.user_id == user.id).all()
 
-# ---------- SUMMARY ----------
-@app.get("/summary", response_model=SummaryOut)
-def summary(
-    month: Optional[str] = None,  # YYYY-MM
-    user_id: int = Depends(get_current_user_id),
-    db: Session = Depends(get_db),
-):
-    all_txs = db.query(Transaction).filter(Transaction.user_id == user_id).all()
-    ana = 0.0
-    for t in all_txs:
-        ana += t.amount if t.type == "income" else -t.amount
+    income = sum(t.amount for t in txs if t.type == "income")
+    expense = sum(t.amount for t in txs if t.type == "expense")
 
-    now = datetime.now(IST)
-    if not month:
-        month = now.strftime("%Y-%m")
+    return {
+        "ana_kasa": income - expense,
+        "income_total": income,
+        "expense_total": expense
+    }
 
-    y, m = month.split("-")
-    y = int(y)
-    m = int(m)
-
-    start_dt = datetime(y, m, 1, tzinfo=IST)
-    end_dt = datetime(y + 1, 1, 1, tzinfo=IST) if m == 12 else datetime(y, m + 1, 1, tzinfo=IST)
-
-    month_txs = db.query(Transaction).filter(
-        Transaction.user_id == user_id,
-        Transaction.created_at >= start_dt,
-        Transaction.created_at < end_dt,
-    ).all()
-
-    income_total = 0.0
-    expense_total = 0.0
-    aylik = 0.0
-    for t in month_txs:
-        if t.type == "income":
-            income_total += t.amount
-            aylik += t.amount
-        else:
-            expense_total += t.amount
-            aylik -= t.amount
-
-    return SummaryOut(
-        ana_kasa=round(ana, 2),
-        aylik_kasa=round(aylik, 2),
-        month=month,
-        income_total=round(income_total, 2),
-        expense_total=round(expense_total, 2),
-    )
+@app.get("/")
+def root():
+    return {"status": "Backend çalışıyor 🚀"}
