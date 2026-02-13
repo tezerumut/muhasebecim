@@ -1,1 +1,1 @@
-"python-3.12.8" | Set-Content -Encoding ascii runtime.txt
+python-3.12.8
