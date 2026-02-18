@@ -121,6 +121,7 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
 # --- UYGULAMA ---
 app = FastAPI(title="Muhasebecim API 2026")
 
+# CORS AYARI: Butonun "tıklanmama" sorununu kökten çözer
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -140,7 +141,7 @@ async def startup():
 def health():
     return {"status": "ok", "db": "mongodb_atlas"}
 
-# --- ENDPOINTS ---
+# --- ENDPOINTS (TÜM MANTIK AYNI) ---
 @app.post("/api/register", response_model=TokenOut)
 async def register(body: AuthBody):
     if await User.find_one(User.email == body.email):
@@ -178,7 +179,6 @@ async def list_tx(me: User = Depends(get_current_user), q: Optional[str] = Query
 
 @app.delete("/api/transactions/{tx_id}")
 async def delete_tx(tx_id: str, me: User = Depends(get_current_user)):
-    # find_one yerine direkt get(tx_id) daha garantidir
     tx = await Transaction.get(tx_id)
     if not tx or tx.user_id != str(me.id): raise HTTPException(404, "İşlem bulunamadı")
     await tx.delete()
@@ -196,7 +196,6 @@ async def list_bills(me: User = Depends(get_current_user)):
 
 @app.patch("/api/bills/{bill_id}/paid", response_model=BillOut)
 async def set_bill_paid(bill_id: str, body: dict, me: User = Depends(get_current_user)):
-    # get(bill_id) kullanarak MongoDB ID karmaşasını önlüyoruz
     b = await Bill.get(bill_id)
     if not b or b.user_id != str(me.id): raise HTTPException(404, "Fatura bulunamadı")
     
@@ -221,7 +220,6 @@ async def set_bill_paid(bill_id: str, body: dict, me: User = Depends(get_current
 async def delete_bill(bill_id: str, me: User = Depends(get_current_user)):
     b = await Bill.get(bill_id)
     if not b or b.user_id != str(me.id): raise HTTPException(404, "Fatura bulunamadı")
-    # Faturaya bağlı işlemi de siliyoruz (Senin orijinal mantığın)
     await Transaction.find(Transaction.source == "bill", Transaction.source_id == str(b.id)).delete()
     await b.delete()
     return {"ok": True}
