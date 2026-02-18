@@ -1,23 +1,26 @@
 import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List
+from typing import Optional, List, Annotated
 import os
 
 import jwt
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, BeforeValidator
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import Document, init_beanie, Indexed
 import asyncio
 
 # --- AYARLAR ---
-# MongoDB URL'ini hem koddan hem de Render ortam değişkenlerinden alacak şekilde ayarladık
 MONGODB_URL = os.environ.get("MONGODB_URL", "mongodb+srv://admin:Goldpony1234@cluster0.s9m6bix.mongodb.net/muhasebe_db?retryWrites=true&w=majority")
 SECRET_KEY = "UMUT_SECRET_2026"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
+
+# --- ÖZEL TİP: ObjectId Hatalarını Çözen Yapı ---
+# Bu kısım loglardaki "Input should be a valid string" hatasını engeller.
+PyObjectId = Annotated[str, BeforeValidator(str)]
 
 # --- MODELLER (Beanie) ---
 class User(Document):
@@ -68,7 +71,7 @@ class TxCreate(BaseModel):
 
 class TxOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
-    id: str = Field(alias="_id")
+    id: PyObjectId = Field(alias="_id") # Kimlik hatası burada çözüldü
     title: str
     amount: float
     type: str
@@ -82,7 +85,7 @@ class BillCreate(BaseModel):
 
 class BillOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
-    id: str = Field(alias="_id")
+    id: PyObjectId = Field(alias="_id") # Kimlik hatası burada çözüldü
     title: str
     amount: float
     due_date: Optional[str] = None
@@ -123,7 +126,6 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
 # --- UYGULAMA ---
 app = FastAPI(title="Muhasebecim API 2026")
 
-# CORS AYARI: Vercel'den gelen tüm istekleri kabul etmesini sağlar
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -136,7 +138,6 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     client = AsyncIOMotorClient(MONGODB_URL)
-    # Veritabanı ismini "muhasebe_db" olarak sabitledik
     db = client.get_database("muhasebe_db")
     await init_beanie(database=db, document_models=[User, Transaction, Bill])
 
