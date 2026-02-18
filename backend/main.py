@@ -1,290 +1,222 @@
-from fastapi import FastAPI, Depends, HTTPException, Header, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, func
-from sqlalchemy.orm import sessionmaker, declarative_base, Session
-from datetime import datetime, timedelta, timezone, date
-import jwt
 import hashlib
-import os
+from datetime import datetime, timedelta, timezone
+from typing import Optional, List
 
-# ================= DATABASE =================
+import jwt
+from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from motor.motor_asyncio import AsyncIOMotorClient
+from beanie import Document, init_beanie, Indexed
+import asyncio
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./esnaf_defteri.db")
-
-# Heroku/Render vb bazen postgres:// verir
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {},
-)
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
-Base = declarative_base()
-
-# ================= JWT =================
-
-SECRET_KEY = os.getenv("JWT_SECRET", "UMUT_SECRET_2026")
+# --- AYARLAR ---
+MONGODB_URL = "mongodb+srv://admin:Goldpony1234@cluster0.s9m6bix.mongodb.net/muhasebe_db?retryWrites=true&w=majority"
+SECRET_KEY = "UMUT_SECRET_2026"
 ALGORITHM = "HS256"
-TOKEN_EXPIRE_DAYS = 30
+ACCESS_TOKEN_EXPIRE_DAYS = 30
 
-# ================= MODELS =================
+# --- MODELLER (Beanie) ---
+class User(Document):
+    email: Indexed(str, unique=True)
+    password_hash: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    password = Column(String, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    class Settings:
+        name = "users"
 
-
-class Transaction(Base):
-    __tablename__ = "transactions"
-    id = Column(Integer, primary_key=True, index=True)
-
-    title = Column(String, nullable=False)
-    amount = Column(Float, nullable=False)
-    type = Column(String, nullable=False)  # income / expense
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
-
-    user_id = Column(Integer, index=True, nullable=False)
-
-
-Base.metadata.create_all(bind=engine)
-
-# ================= SCHEMAS =================
-
-class RegisterSchema(BaseModel):
-    email: str = Field(..., min_length=3)
-    password: str = Field(..., min_length=3)
-
-class LoginSchema(BaseModel):
-    email: str
-    password: str
-
-class TxSchema(BaseModel):
-    title: str = Field(..., min_length=1)
+class Transaction(Document):
+    user_id: str
+    title: str
     amount: float
-    type: str  # income/expense
+    type: str 
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    source: Optional[str] = None
+    source_id: Optional[str] = None
 
-# ================= APP =================
+    class Settings:
+        name = "transactions"
 
-app = FastAPI()
+class Bill(Document):
+    user_id: str
+    title: str
+    amount: float
+    due_date: Optional[str] = None
+    is_paid: bool = False
+    paid_at: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    class Settings:
+        name = "bills"
+
+# --- ŞEMALAR (Pydantic v2) ---
+class AuthBody(BaseModel):
+    email: EmailStr
+    password: str = Field(min_length=4)
+
+class TokenOut(BaseModel):
+    token: str
+    email: EmailStr
+
+class TxCreate(BaseModel):
+    title: str = Field(min_length=1)
+    amount: float = Field(gt=0)
+    type: str = Field(pattern="^(income|expense)$")
+
+class TxOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+    id: str = Field(alias="_id")
+    title: str
+    amount: float
+    type: str
+    created_at: datetime
+    source: Optional[str] = None
+
+class BillCreate(BaseModel):
+    title: str = Field(min_length=1)
+    amount: float = Field(gt=0)
+    due_date: Optional[str] = None
+
+class BillOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+    id: str = Field(alias="_id")
+    title: str
+    amount: float
+    due_date: Optional[str] = None
+    is_paid: bool
+    paid_at: Optional[datetime] = None
+    created_at: datetime
+
+class StatsOut(BaseModel):
+    total_income: float
+    total_expense: float
+    balance: float
+
+# --- ARAÇLAR ---
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+def create_access_token(user_id: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
+    payload = {"sub": str(user_id), "exp": expire}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+security = HTTPBearer(auto_error=False)
+
+async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> User:
+    if not creds or not creds.credentials:
+        raise HTTPException(401, "Oturum açmanız gerekiyor")
+    try:
+        payload = jwt.decode(creds.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        uid = payload["sub"]
+    except:
+        raise HTTPException(401, "Geçersiz token")
+    
+    user = await User.get(uid)
+    if not user:
+        raise HTTPException(401, "Kullanıcı bulunamadı")
+    return user
+
+# --- UYGULAMA ---
+app = FastAPI(title="Muhasebecim API 2026")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # prod'da domain'e daraltırız
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ================= DB DEP =================
+@app.on_event("startup")
+async def startup():
+    client = AsyncIOMotorClient(MONGODB_URL)
+    # Veritabanı ismini otomatik alması için default_database kullanıyoruz
+    await init_beanie(database=client.get_default_database(), document_models=[User, Transaction, Bill])
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "db": "mongodb_atlas"}
 
-# ================= AUTH =================
+# --- ENDPOINTS ---
+@app.post("/api/register", response_model=TokenOut)
+async def register(body: AuthBody):
+    if await User.find_one(User.email == body.email):
+        raise HTTPException(400, "Bu e-posta adresi zaten kayıtlı")
+    u = User(email=body.email, password_hash=hash_password(body.password))
+    await u.insert()
+    return TokenOut(token=create_access_token(str(u.id)), email=u.email)
 
-def hash_password(pw: str) -> str:
-    return hashlib.sha256(pw.encode("utf-8")).hexdigest()
+@app.post("/api/login", response_model=TokenOut)
+async def login(body: AuthBody):
+    u = await User.find_one(User.email == body.email)
+    if not u or u.password_hash != hash_password(body.password):
+        raise HTTPException(401, "Hatalı e-posta veya şifre")
+    return TokenOut(token=create_access_token(str(u.id)), email=u.email)
 
-def create_token(user_id: int) -> str:
-    now = datetime.now(timezone.utc)
-    exp = now + timedelta(days=TOKEN_EXPIRE_DAYS)
-    payload = {"user_id": user_id, "iat": int(now.timestamp()), "exp": int(exp.timestamp())}
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+@app.get("/api/stats", response_model=StatsOut)
+async def get_stats(me: User = Depends(get_current_user)):
+    txs = await Transaction.find(Transaction.user_id == str(me.id)).to_list()
+    income = sum(t.amount for t in txs if t.type == "income")
+    expense = sum(t.amount for t in txs if t.type == "expense")
+    return StatsOut(total_income=income, total_expense=expense, balance=income - expense)
 
-def get_current_user(authorization: str = Header(None), db: Session = Depends(get_db)) -> User:
-    if not authorization:
-        raise HTTPException(status_code=401, detail="No token")
-
-    token = authorization.replace("Bearer ", "").strip()
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user = db.query(User).filter(User.id == payload.get("user_id")).first()
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        return user
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
-
-# ================= HELPERS =================
-
-def parse_yyyy_mm_dd(s: str) -> datetime:
-    # 2026-02-14 gibi
-    try:
-        d = datetime.strptime(s, "%Y-%m-%d").date()
-        return datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
-    except Exception:
-        raise HTTPException(status_code=400, detail=f"Invalid date: {s}. Use YYYY-MM-DD")
-
-def month_range(year: int, month: int):
-    start = datetime(year, month, 1, tzinfo=timezone.utc)
-    if month == 12:
-        end = datetime(year + 1, 1, 1, tzinfo=timezone.utc)
-    else:
-        end = datetime(year, month + 1, 1, tzinfo=timezone.utc)
-    return start, end
-
-# ================= ROUTES =================
-
-@app.get("/")
-def root():
-    return {"status": "Backend çalışıyor 🚀"}
-
-@app.post("/auth/register")
-def register(data: RegisterSchema, db: Session = Depends(get_db)):
-    if db.query(User).filter(User.email == data.email).first():
-        raise HTTPException(status_code=400, detail="User exists")
-
-    user = User(email=data.email, password=hash_password(data.password))
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return {"token": create_token(user.id)}
-
-@app.post("/auth/login")
-def login(data: LoginSchema, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == data.email).first()
-    if not user or user.password != hash_password(data.password):
-        raise HTTPException(status_code=401, detail="Wrong credentials")
-    return {"token": create_token(user.id)}
-
-@app.post("/transactions")
-def create_tx(data: TxSchema, user=Depends(get_current_user), db: Session = Depends(get_db)):
-    if data.type not in ("income", "expense"):
-        raise HTTPException(status_code=400, detail="type must be 'income' or 'expense'")
-
-    tx = Transaction(
-        title=data.title.strip(),
-        amount=float(data.amount),
-        type=data.type,
-        user_id=user.id,
-    )
-    db.add(tx)
-    db.commit()
-    db.refresh(tx)
+@app.post("/api/transactions", response_model=TxOut)
+async def create_tx(body: TxCreate, me: User = Depends(get_current_user)):
+    tx = Transaction(user_id=str(me.id), title=body.title.strip(), amount=body.amount, type=body.type)
+    await tx.insert()
     return tx
 
-@app.get("/transactions")
-def list_tx(
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
+@app.get("/api/transactions", response_model=List[TxOut])
+async def list_tx(me: User = Depends(get_current_user), q: Optional[str] = Query(None), type: Optional[str] = Query(None)):
+    query = Transaction.find(Transaction.user_id == str(me.id))
+    if q: query = query.find({"title": {"$regex": q, "$options": "i"}})
+    if type: query = query.find(Transaction.type == type)
+    return await query.sort(-Transaction.created_at).to_list()
 
-    # filtreler
-    period: str | None = Query(default=None, description="daily|monthly"),
-    from_date: str | None = Query(default=None, alias="from", description="YYYY-MM-DD"),
-    to_date: str | None = Query(default=None, alias="to", description="YYYY-MM-DD"),
-    q: str | None = Query(default=None, description="title search"),
-    type: str | None = Query(default=None, description="income|expense"),
-    min_amount: float | None = Query(default=None),
-    max_amount: float | None = Query(default=None),
-
-    # sayfalama
-    limit: int = Query(default=200, ge=1, le=2000),
-    offset: int = Query(default=0, ge=0),
-):
-    query = db.query(Transaction).filter(Transaction.user_id == user.id)
-
-    # period hızlı filtre
-    now = datetime.now(timezone.utc)
-    if period == "daily":
-        start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
-        end = start + timedelta(days=1)
-        query = query.filter(Transaction.created_at >= start, Transaction.created_at < end)
-    elif period == "monthly":
-        start, end = month_range(now.year, now.month)
-        query = query.filter(Transaction.created_at >= start, Transaction.created_at < end)
-    elif period is not None:
-        raise HTTPException(status_code=400, detail="period must be daily or monthly")
-
-    # özel aralık
-    if from_date:
-        start = parse_yyyy_mm_dd(from_date)
-        query = query.filter(Transaction.created_at >= start)
-    if to_date:
-        end = parse_yyyy_mm_dd(to_date) + timedelta(days=1)  # günü dahil et
-        query = query.filter(Transaction.created_at < end)
-
-    # type
-    if type:
-        if type not in ("income", "expense"):
-            raise HTTPException(status_code=400, detail="type must be income or expense")
-        query = query.filter(Transaction.type == type)
-
-    # arama
-    if q:
-        query = query.filter(Transaction.title.ilike(f"%{q.strip()}%"))
-
-    # amount aralığı
-    if min_amount is not None:
-        query = query.filter(Transaction.amount >= float(min_amount))
-    if max_amount is not None:
-        query = query.filter(Transaction.amount <= float(max_amount))
-
-    rows = (
-        query.order_by(Transaction.created_at.desc(), Transaction.id.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
-    return rows
-
-@app.delete("/transactions/{tx_id}")
-def delete_tx(tx_id: int, user=Depends(get_current_user), db: Session = Depends(get_db)):
-    tx = db.query(Transaction).filter(Transaction.id == tx_id, Transaction.user_id == user.id).first()
-    if not tx:
-        raise HTTPException(status_code=404, detail="Not found")
-    db.delete(tx)
-    db.commit()
+@app.delete("/api/transactions/{tx_id}")
+async def delete_tx(tx_id: str, me: User = Depends(get_current_user)):
+    tx = await Transaction.find_one(Transaction.id == tx_id, Transaction.user_id == str(me.id))
+    if not tx: raise HTTPException(404, "İşlem bulunamadı")
+    await tx.delete()
     return {"ok": True}
 
-@app.get("/summary")
-def summary(
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-    year: int | None = Query(default=None),
-    month: int | None = Query(default=None, ge=1, le=12),
-):
-    """
-    ana_kasa: tüm zaman net
-    aylik_kasa: seçilen ay net (year/month verilmezse bu ay)
-    """
-    txs_all = db.query(Transaction).filter(Transaction.user_id == user.id).all()
-    income_all = sum(t.amount for t in txs_all if t.type == "income")
-    expense_all = sum(t.amount for t in txs_all if t.type == "expense")
-    ana_kasa = income_all - expense_all
+@app.post("/api/bills", response_model=BillOut)
+async def create_bill(body: BillCreate, me: User = Depends(get_current_user)):
+    b = Bill(user_id=str(me.id), title=body.title.strip(), amount=body.amount, due_date=body.due_date)
+    await b.insert()
+    return b
 
-    now = datetime.now(timezone.utc)
-    y = year or now.year
-    m = month or now.month
-    start, end = month_range(y, m)
+@app.get("/api/bills", response_model=List[BillOut])
+async def list_bills(me: User = Depends(get_current_user)):
+    return await Bill.find(Bill.user_id == str(me.id)).sort(-Bill.created_at).to_list()
 
-    txs_month = (
-        db.query(Transaction)
-        .filter(Transaction.user_id == user.id, Transaction.created_at >= start, Transaction.created_at < end)
-        .all()
-    )
-    income_m = sum(t.amount for t in txs_month if t.type == "income")
-    expense_m = sum(t.amount for t in txs_month if t.type == "expense")
-    aylik_kasa = income_m - expense_m
+@app.patch("/api/bills/{bill_id}/paid", response_model=BillOut)
+async def set_bill_paid(bill_id: str, body: dict, me: User = Depends(get_current_user)):
+    b = await Bill.find_one(Bill.id == bill_id, Bill.user_id == str(me.id))
+    if not b: raise HTTPException(404, "Fatura bulunamadı")
+    
+    paid_status = body.get("paid", False)
+    if paid_status and not b.is_paid:
+        b.is_paid = True
+        b.paid_at = datetime.now(timezone.utc)
+        tx = Transaction(
+            user_id=str(me.id), title=f"Fatura Ödemesi: {b.title}", 
+            amount=b.amount, type="expense", source="bill", source_id=str(b.id)
+        )
+        await tx.insert()
+    elif not paid_status and b.is_paid:
+        b.is_paid = False
+        b.paid_at = None
+        await Transaction.find(Transaction.source == "bill", Transaction.source_id == str(b.id)).delete()
+    
+    await b.save()
+    return b
 
-    return {
-        "ana_kasa": ana_kasa,
-        "income_total": income_all,
-        "expense_total": expense_all,
-        "aylik_kasa": aylik_kasa,
-        "aylik_income_total": income_m,
-        "aylik_expense_total": expense_m,
-        "ay": f"{y:04d}-{m:02d}",
-    }
+@app.delete("/api/bills/{bill_id}")
+async def delete_bill(bill_id: str, me: User = Depends(get_current_user)):
+    b = await Bill.find_one(Bill.id == bill_id, Bill.user_id == str(me.id))
+    if not b: raise HTTPException(404, "Fatura bulunamadı")
+    await Transaction.find(Transaction.source == "bill", Transaction.source_id == str(b.id)).delete()
+    await b.delete()
+    return {"ok": True}
