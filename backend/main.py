@@ -1,6 +1,7 @@
 import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
+import os
 
 import jwt
 from fastapi import FastAPI, Depends, HTTPException, Query
@@ -12,7 +13,8 @@ from beanie import Document, init_beanie, Indexed
 import asyncio
 
 # --- AYARLAR ---
-MONGODB_URL = "mongodb+srv://admin:Goldpony1234@cluster0.s9m6bix.mongodb.net/muhasebe_db?retryWrites=true&w=majority"
+# MongoDB URL'ini hem koddan hem de Render ortam değişkenlerinden alacak şekilde ayarladık
+MONGODB_URL = os.environ.get("MONGODB_URL", "mongodb+srv://admin:Goldpony1234@cluster0.s9m6bix.mongodb.net/muhasebe_db?retryWrites=true&w=majority")
 SECRET_KEY = "UMUT_SECRET_2026"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
@@ -121,27 +123,28 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
 # --- UYGULAMA ---
 app = FastAPI(title="Muhasebecim API 2026")
 
-# CORS AYARI: Butonun "tıklanmama" sorununu kökten çözer
+# CORS AYARI: Vercel'den gelen tüm istekleri kabul etmesini sağlar
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 @app.on_event("startup")
 async def startup():
     client = AsyncIOMotorClient(MONGODB_URL)
-    # Veritabanı ismini garantiye almak için "muhasebe_db" olarak işaretliyoruz
-    db = client["muhasebe_db"]
+    # Veritabanı ismini "muhasebe_db" olarak sabitledik
+    db = client.get_database("muhasebe_db")
     await init_beanie(database=db, document_models=[User, Transaction, Bill])
 
 @app.get("/api/health")
 def health():
     return {"status": "ok", "db": "mongodb_atlas"}
 
-# --- ENDPOINTS (TÜM MANTIK AYNI) ---
+# --- ENDPOINTS ---
 @app.post("/api/register", response_model=TokenOut)
 async def register(body: AuthBody):
     if await User.find_one(User.email == body.email):
