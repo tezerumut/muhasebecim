@@ -124,6 +124,7 @@ app = FastAPI(title="Muhasebecim API 2026")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -131,8 +132,9 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     client = AsyncIOMotorClient(MONGODB_URL)
-    # Veritabanı ismini otomatik alması için default_database kullanıyoruz
-    await init_beanie(database=client.get_default_database(), document_models=[User, Transaction, Bill])
+    # Veritabanı ismini garantiye almak için "muhasebe_db" olarak işaretliyoruz
+    db = client["muhasebe_db"]
+    await init_beanie(database=db, document_models=[User, Transaction, Bill])
 
 @app.get("/api/health")
 def health():
@@ -176,8 +178,9 @@ async def list_tx(me: User = Depends(get_current_user), q: Optional[str] = Query
 
 @app.delete("/api/transactions/{tx_id}")
 async def delete_tx(tx_id: str, me: User = Depends(get_current_user)):
-    tx = await Transaction.find_one(Transaction.id == tx_id, Transaction.user_id == str(me.id))
-    if not tx: raise HTTPException(404, "İşlem bulunamadı")
+    # find_one yerine direkt get(tx_id) daha garantidir
+    tx = await Transaction.get(tx_id)
+    if not tx or tx.user_id != str(me.id): raise HTTPException(404, "İşlem bulunamadı")
     await tx.delete()
     return {"ok": True}
 
@@ -193,8 +196,9 @@ async def list_bills(me: User = Depends(get_current_user)):
 
 @app.patch("/api/bills/{bill_id}/paid", response_model=BillOut)
 async def set_bill_paid(bill_id: str, body: dict, me: User = Depends(get_current_user)):
-    b = await Bill.find_one(Bill.id == bill_id, Bill.user_id == str(me.id))
-    if not b: raise HTTPException(404, "Fatura bulunamadı")
+    # get(bill_id) kullanarak MongoDB ID karmaşasını önlüyoruz
+    b = await Bill.get(bill_id)
+    if not b or b.user_id != str(me.id): raise HTTPException(404, "Fatura bulunamadı")
     
     paid_status = body.get("paid", False)
     if paid_status and not b.is_paid:
@@ -215,8 +219,9 @@ async def set_bill_paid(bill_id: str, body: dict, me: User = Depends(get_current
 
 @app.delete("/api/bills/{bill_id}")
 async def delete_bill(bill_id: str, me: User = Depends(get_current_user)):
-    b = await Bill.find_one(Bill.id == bill_id, Bill.user_id == str(me.id))
-    if not b: raise HTTPException(404, "Fatura bulunamadı")
+    b = await Bill.get(bill_id)
+    if not b or b.user_id != str(me.id): raise HTTPException(404, "Fatura bulunamadı")
+    # Faturaya bağlı işlemi de siliyoruz (Senin orijinal mantığın)
     await Transaction.find(Transaction.source == "bill", Transaction.source_id == str(b.id)).delete()
     await b.delete()
     return {"ok": True}
