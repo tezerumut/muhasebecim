@@ -11,8 +11,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState(""); 
   const [isRegister, setIsRegister] = useState(false); 
-  const [deleteConfirm, setDeleteConfirm] = useState(null);
-  
+
   const now = new Date();
   const firstDay = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
   const todayStr = now.toISOString().split('T')[0];
@@ -56,7 +55,10 @@ export default function App() {
     if (!jwt) return;
     setLoading(true);
     try {
-      const headers = { "Authorization": `Bearer ${jwt}` };
+      const headers = { 
+        "Authorization": `Bearer ${jwt}`,
+        "Cache-Control": "no-cache"
+      };
       const tRes = await fetch(`${API}/api/transactions?start_date=${startDate}&end_date=${endDate}`, { headers });
       if (tRes.status === 401) return logout();
       const data = await tRes.json();
@@ -68,7 +70,6 @@ export default function App() {
   useEffect(() => { if (signedIn) refreshData(); }, [signedIn, startDate, endDate]);
 
   const filteredItems = useMemo(() => {
-    // Önce arama filtresi, sonra tarihe göre (yeni en üstte) sıralama
     return items
       .filter(t => (t.title || "").toLowerCase().includes(searchTerm.toLowerCase()))
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -231,7 +232,6 @@ export default function App() {
           <span style={{fontSize:'0.8rem'}}>{filteredItems.length} Kayıt</span>
         </div>
         {filteredItems.map(t => {
-          // MongoDB'den gelen _id'yi veya id'yi yakala
           const currentId = t._id || t.id;
           return (
             <div key={currentId} style={{ display: 'flex', justifyContent: 'space-between', padding: 15, borderBottom: '1px solid #f8f8f8' }}>
@@ -240,19 +240,33 @@ export default function App() {
                 <small style={{ color: '#bbb', fontSize: '0.7rem' }}>{new Date(t.created_at).toLocaleDateString('tr-TR')} - {t.payment_method}</small>
               </div>
               <div style={{ textAlign: 'right' }}>
-                <b style={{ color: t.type === 'income' ? '#2e7d32' : '#c62828', fontSize: '1rem' }}>{t.type === 'income' ? '+' : '-'}{Number(t.amount).toFixed(2)} ₺</b>
+                <b style={{ color: t.type === 'income' ? '#2e7d32' : '#c62828', fontSize: '1rem' }}>
+                    {t.type === 'income' ? '+' : '-'}{Number(t.amount).toFixed(2)} ₺
+                </b>
                 <br/>
-                {deleteConfirm === currentId ? (
-                  <button onClick={async () => {
-                    await fetch(`${API}/api/transactions/${currentId}`, { 
-                      method: "DELETE", 
-                      headers: { "Authorization": `Bearer ${jwt}` } 
-                    });
-                    setDeleteConfirm(null); refreshData();
-                  }} style={{ background: '#ff4d4d', border: 'none', color: '#fff', fontSize: '0.7rem', padding: '5px 12px', borderRadius: 8, fontWeight:'bold' }}>SİL</button>
-                ) : (
-                  <button onClick={() => setDeleteConfirm(currentId)} style={{ background: 'none', border: 'none', color: '#000', fontSize: '0.75rem', fontWeight:'bold', textDecoration:'underline' }}>Sil</button>
-                )}
+                <button 
+                  onClick={async (e) => {
+                    const originalText = e.target.innerText;
+                    e.target.innerText = "...";
+                    try {
+                      const res = await fetch(`${API}/api/transactions/${currentId}`, { 
+                        method: "DELETE", 
+                        headers: { "Authorization": `Bearer ${jwt}` } 
+                      });
+                      if(res.ok) {
+                        refreshData(); 
+                      } else {
+                        alert("Silinemedi!");
+                        e.target.innerText = originalText;
+                      }
+                    } catch (err) {
+                      e.target.innerText = originalText;
+                    }
+                  }} 
+                  style={{ background: 'none', border: 'none', color: '#ff4d4d', fontSize: '0.75rem', fontWeight:'bold', textDecoration:'underline', cursor: 'pointer' }}
+                >
+                  Sil
+                </button>
               </div>
             </div>
           );
