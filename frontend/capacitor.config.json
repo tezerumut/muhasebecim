@@ -1,0 +1,10 @@
+{
+  "appId": "com.muhasebecim.app",
+  "appName": "Muhasebecim",
+  "webDir": "dist",
+  "server": {
+    "cleartext": true,
+    "allowNavigation": ["192.168.1.21"],
+    "androidScheme": "http"
+  }
+}

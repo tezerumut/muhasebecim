@@ -1,12 +1,26 @@
+// frontend/src/api.js
+
 const API_BASE =
-  import.meta.env.VITE_API_URL?.replace(/\/$/, "") || "http://127.0.0.1:8000";
+  (import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || "")
+    .trim()
+    .replace(/\/+$/, "") || "http://192.168.1.21:8000";
 
 export function getToken() {
   return localStorage.getItem("token") || "";
 }
 
+export function setToken(token) {
+  localStorage.setItem("token", token || "");
+}
+
+export function clearToken() {
+  localStorage.removeItem("token");
+}
+
 export function authHeaders(extra = {}) {
   const token = getToken();
+  // TOKEN debug
+  console.log("TOKEN:", token);
   return token ? { ...extra, Authorization: "Bearer " + token } : { ...extra };
 }
 

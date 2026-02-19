@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">muhasebecim</string>
+    <string name="title_activity_main">muhasebecim</string>
+    <string name="package_name">com.muhasebecim.app</string>
+    <string name="custom_url_scheme">com.muhasebecim.app</string>
+</resources>
