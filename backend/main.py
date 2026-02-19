@@ -7,7 +7,7 @@ import jwt
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, EmailStr, Field, ConfigDict, BeforeValidator
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, BeforeValidator, computed_field
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import Document, init_beanie, Indexed
 import asyncio
@@ -18,15 +18,14 @@ SECRET_KEY = "UMUT_SECRET_2026"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
 
-# --- ÖZEL TİP: ObjectId Hatalarını Çözen Yapı ---
+# --- ÖZEL TİP ---
 PyObjectId = Annotated[str, BeforeValidator(str)]
 
-# --- MODELLER (Beanie) ---
+# --- MODELLER ---
 class User(Document):
     email: Indexed(str, unique=True)
     password_hash: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
     class Settings:
         name = "users"
 
@@ -40,7 +39,6 @@ class Transaction(Document):
     source_id: Optional[str] = None
     payment_method: Optional[str] = None
     description: Optional[str] = None
-
     class Settings:
         name = "transactions"
 
@@ -52,11 +50,10 @@ class Bill(Document):
     is_paid: bool = False
     paid_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
     class Settings:
         name = "bills"
 
-# --- ŞEMALAR (Pydantic v2) ---
+# --- ŞEMALAR ---
 class AuthBody(BaseModel):
     email: EmailStr
     password: str = Field(min_length=4)
@@ -75,7 +72,6 @@ class TxCreate(BaseModel):
 class TxOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
     id: PyObjectId = Field(alias="_id")
-    _id: PyObjectId = Field(alias="_id") # 🔥 KRİTİK: Frontend'deki t.id hatasını çözer
     title: str
     amount: float
     type: str
@@ -84,21 +80,25 @@ class TxOut(BaseModel):
     payment_method: Optional[str] = None
     description: Optional[str] = None
 
-class BillCreate(BaseModel):
-    title: str = Field(min_length=1)
-    amount: float = Field(gt=0)
-    due_date: Optional[str] = None
+    @computed_field(alias="_id")
+    @property
+    def underscore_id(self) -> str:
+        return str(self.id)
 
 class BillOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
     id: PyObjectId = Field(alias="_id")
-    _id: PyObjectId = Field(alias="_id") # 🔥 KRİTİK: Faturalar için de eklendi
     title: str
     amount: float
     due_date: Optional[str] = None
     is_paid: bool
     paid_at: Optional[datetime] = None
     created_at: datetime
+
+    @computed_field(alias="_id")
+    @property
+    def underscore_id(self) -> str:
+        return str(self.id)
 
 class StatsOut(BaseModel):
     total_income: float
@@ -124,7 +124,6 @@ async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(securit
         uid = payload["sub"]
     except:
         raise HTTPException(401, "Geçersiz token")
-    
     user = await User.get(uid)
     if not user:
         raise HTTPException(401, "Kullanıcı bulunamadı")
@@ -150,7 +149,7 @@ async def startup():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "db": "mongodb_atlas"}
+    return {"status": "ok"}
 
 # --- ENDPOINTS ---
 @app.post("/api/register", response_model=TokenOut)
@@ -178,12 +177,9 @@ async def get_stats(me: User = Depends(get_current_user)):
 @app.post("/api/transactions", response_model=TxOut)
 async def create_tx(body: TxCreate, me: User = Depends(get_current_user)):
     tx = Transaction(
-        user_id=str(me.id), 
-        title=body.title.strip(), 
-        amount=body.amount, 
-        type=body.type,
-        payment_method=body.payment_method,
-        description=body.description
+        user_id=str(me.id), title=body.title.strip(), 
+        amount=body.amount, type=body.type,
+        payment_method=body.payment_method, description=body.description
     )
     await tx.insert()
     return tx
@@ -199,7 +195,6 @@ async def list_tx(
     query = Transaction.find(Transaction.user_id == str(me.id))
     if q: query = query.find({"title": {"$regex": q, "$options": "i"}})
     if type: query = query.find(Transaction.type == type)
-    
     if start_date or end_date:
         date_filter = {}
         try:
@@ -209,21 +204,15 @@ async def list_tx(
                 date_filter["$lte"] = datetime.fromisoformat(end_date.replace("Z", "+00:00")).replace(hour=23, minute=59, second=59)
             if date_filter:
                 query = query.find({"created_at": date_filter})
-        except:
-            pass
-
+        except: pass
     return await query.sort(-Transaction.created_at).to_list()
 
 @app.delete("/api/transactions/{tx_id}")
 async def delete_tx(tx_id: str, me: User = Depends(get_current_user)):
-    try:
-        tx = await Transaction.find_one(Transaction.id == tx_id, Transaction.user_id == str(me.id))
-        if not tx:
-            raise HTTPException(404, "İşlem bulunamadı")
-        await tx.delete()
-        return {"ok": True}
-    except Exception as e:
-        raise HTTPException(500, f"Silme hatası: {str(e)}")
+    tx = await Transaction.find_one(Transaction.id == tx_id, Transaction.user_id == str(me.id))
+    if not tx: raise HTTPException(404, "Bulunamadı")
+    await tx.delete()
+    return {"ok": True}
 
 @app.post("/api/bills", response_model=BillOut)
 async def create_bill(body: BillCreate, me: User = Depends(get_current_user)):
@@ -239,7 +228,6 @@ async def list_bills(me: User = Depends(get_current_user)):
 async def set_bill_paid(bill_id: str, body: dict, me: User = Depends(get_current_user)):
     b = await Bill.get(bill_id)
     if not b or b.user_id != str(me.id): raise HTTPException(404, "Fatura bulunamadı")
-    
     paid_status = body.get("paid", False)
     if paid_status and not b.is_paid:
         b.is_paid = True
@@ -253,7 +241,6 @@ async def set_bill_paid(bill_id: str, body: dict, me: User = Depends(get_current
         b.is_paid = False
         b.paid_at = None
         await Transaction.find(Transaction.source == "bill", Transaction.source_id == str(b.id)).delete()
-    
     await b.save()
     return b
 
