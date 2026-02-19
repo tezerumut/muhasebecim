@@ -1,7 +1,7 @@
 import hashlib
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Annotated
-import os
 
 import jwt
 from fastapi import FastAPI, Depends, HTTPException, Query
@@ -10,7 +10,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field, ConfigDict, BeforeValidator, computed_field
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import Document, init_beanie, Indexed
-import asyncio
+from bson import ObjectId
 
 # --- AYARLAR ---
 MONGODB_URL = os.environ.get("MONGODB_URL", "mongodb+srv://admin:Goldpony1234@cluster0.s9m6bix.mongodb.net/muhasebe_db?retryWrites=true&w=majority")
@@ -26,8 +26,7 @@ class User(Document):
     email: Indexed(str, unique=True)
     password_hash: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    class Settings:
-        name = "users"
+    class Settings: name = "users"
 
 class Transaction(Document):
     user_id: str
@@ -39,8 +38,7 @@ class Transaction(Document):
     source_id: Optional[str] = None
     payment_method: Optional[str] = None
     description: Optional[str] = None
-    class Settings:
-        name = "transactions"
+    class Settings: name = "transactions"
 
 class Bill(Document):
     user_id: str
@@ -50,8 +48,7 @@ class Bill(Document):
     is_paid: bool = False
     paid_at: Optional[datetime] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    class Settings:
-        name = "bills"
+    class Settings: name = "bills"
 
 # --- ŞEMALAR ---
 class AuthBody(BaseModel):
@@ -82,8 +79,7 @@ class TxOut(BaseModel):
 
     @computed_field(alias="_id")
     @property
-    def underscore_id(self) -> str:
-        return str(self.id)
+    def underscore_id(self) -> str: return str(self.id)
 
 class BillOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
@@ -97,8 +93,7 @@ class BillOut(BaseModel):
 
     @computed_field(alias="_id")
     @property
-    def underscore_id(self) -> str:
-        return str(self.id)
+    def underscore_id(self) -> str: return str(self.id)
 
 class StatsOut(BaseModel):
     total_income: float
@@ -111,112 +106,82 @@ def hash_password(password: str) -> str:
 
 def create_access_token(user_id: str) -> str:
     expire = datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)
-    payload = {"sub": str(user_id), "exp": expire}
-    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    return jwt.encode({"sub": str(user_id), "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
 
-security = HTTPBearer(auto_error=False)
+security = HTTPBearer()
 
 async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> User:
-    if not creds or not creds.credentials:
-        raise HTTPException(401, "Oturum açmanız gerekiyor")
     try:
         payload = jwt.decode(creds.credentials, SECRET_KEY, algorithms=[ALGORITHM])
-        uid = payload["sub"]
-    except:
-        raise HTTPException(401, "Geçersiz token")
-    user = await User.get(uid)
-    if not user:
-        raise HTTPException(401, "Kullanıcı bulunamadı")
-    return user
+        user = await User.get(payload["sub"])
+        if user: return user
+    except: pass
+    raise HTTPException(401, "Oturum geçersiz")
 
 # --- UYGULAMA ---
 app = FastAPI(title="Muhasebecim API 2026")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["*"]
-)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.on_event("startup")
 async def startup():
     client = AsyncIOMotorClient(MONGODB_URL)
-    db = client.get_database("muhasebe_db")
-    await init_beanie(database=db, document_models=[User, Transaction, Bill])
-
-@app.get("/api/health")
-def health():
-    return {"status": "ok"}
+    await init_beanie(database=client.get_database("muhasebe_db"), document_models=[User, Transaction, Bill])
 
 # --- ENDPOINTS ---
 @app.post("/api/register", response_model=TokenOut)
 async def register(body: AuthBody):
-    if await User.find_one(User.email == body.email):
-        raise HTTPException(400, "Bu e-posta adresi zaten kayıtlı")
+    if await User.find_one(User.email == body.email): raise HTTPException(400, "E-posta kayıtlı")
     u = User(email=body.email, password_hash=hash_password(body.password))
     await u.insert()
     return TokenOut(token=create_access_token(str(u.id)), email=u.email)
 
 @app.post("/api/login", response_model=TokenOut)
 async def login(body: AuthBody):
-    u = await User.find_one(User.email == body.email)
-    if not u or u.password_hash != hash_password(body.password):
-        raise HTTPException(401, "Hatalı e-posta veya şifre")
+    u = await User.find_one(User.email == body.email, User.password_hash == hash_password(body.password))
+    if not u: raise HTTPException(401, "Hatalı giriş")
     return TokenOut(token=create_access_token(str(u.id)), email=u.email)
 
 @app.get("/api/stats", response_model=StatsOut)
 async def get_stats(me: User = Depends(get_current_user)):
     txs = await Transaction.find(Transaction.user_id == str(me.id)).to_list()
-    income = sum(t.amount for t in txs if t.type == "income")
-    expense = sum(t.amount for t in txs if t.type == "expense")
-    return StatsOut(total_income=income, total_expense=expense, balance=income - expense)
+    inc = sum(t.amount for t in txs if t.type == "income")
+    exp = sum(t.amount for t in txs if t.type == "expense")
+    return StatsOut(total_income=inc, total_expense=exp, balance=inc - exp)
+
+@app.get("/api/transactions", response_model=List[TxOut])
+async def list_tx(me: User = Depends(get_current_user), q: str = None, start_date: str = None, end_date: str = None):
+    query = Transaction.find(Transaction.user_id == str(me.id))
+    if q: query = query.find({"title": {"$regex": q, "$options": "i"}})
+    if start_date and end_date:
+        s = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+        e = datetime.fromisoformat(end_date.replace("Z", "+00:00")).replace(hour=23, minute=59, second=59)
+        query = query.find({"created_at": {"$gte": s, "$lte": e}})
+    return await query.sort(-Transaction.created_at).to_list()
 
 @app.post("/api/transactions", response_model=TxOut)
 async def create_tx(body: TxCreate, me: User = Depends(get_current_user)):
-    tx = Transaction(
-        user_id=str(me.id), title=body.title.strip(), 
-        amount=body.amount, type=body.type,
-        payment_method=body.payment_method, description=body.description
-    )
+    tx = Transaction(user_id=str(me.id), **body.dict())
     await tx.insert()
     return tx
 
-@app.get("/api/transactions", response_model=List[TxOut])
-async def list_tx(
-    me: User = Depends(get_current_user), 
-    q: Optional[str] = Query(None), 
-    type: Optional[str] = Query(None),
-    start_date: Optional[str] = Query(None),
-    end_date: Optional[str] = Query(None)
-):
-    query = Transaction.find(Transaction.user_id == str(me.id))
-    if q: query = query.find({"title": {"$regex": q, "$options": "i"}})
-    if type: query = query.find(Transaction.type == type)
-    if start_date or end_date:
-        date_filter = {}
-        try:
-            if start_date:
-                date_filter["$gte"] = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
-            if end_date:
-                date_filter["$lte"] = datetime.fromisoformat(end_date.replace("Z", "+00:00")).replace(hour=23, minute=59, second=59)
-            if date_filter:
-                query = query.find({"created_at": date_filter})
-        except: pass
-    return await query.sort(-Transaction.created_at).to_list()
-
 @app.delete("/api/transactions/{tx_id}")
 async def delete_tx(tx_id: str, me: User = Depends(get_current_user)):
-    tx = await Transaction.find_one(Transaction.id == tx_id, Transaction.user_id == str(me.id))
-    if not tx: raise HTTPException(404, "Bulunamadı")
+    # GARANTİ SİLME: Hem Beanie hem manuel MongoDB ObjectId kontrolü
+    try:
+        target_id = ObjectId(tx_id) if ObjectId.is_valid(tx_id) else tx_id
+        tx = await Transaction.find_one({"_id": target_id, "user_id": str(me.id)})
+        if not tx: # String olarak tekrar dene
+            tx = await Transaction.find_one({"_id": tx_id, "user_id": str(me.id)})
+    except:
+        tx = await Transaction.find_one(Transaction.id == tx_id, Transaction.user_id == str(me.id))
+    
+    if not tx: raise HTTPException(404, "Kayıt bulunamadı")
     await tx.delete()
     return {"ok": True}
 
 @app.post("/api/bills", response_model=BillOut)
-async def create_bill(body: BillCreate, me: User = Depends(get_current_user)):
-    b = Bill(user_id=str(me.id), title=body.title.strip(), amount=body.amount, due_date=body.due_date)
+async def create_bill(body: dict, me: User = Depends(get_current_user)):
+    b = Bill(user_id=str(me.id), title=body['title'], amount=body['amount'], due_date=body.get('due_date'))
     await b.insert()
     return b
 
@@ -227,27 +192,13 @@ async def list_bills(me: User = Depends(get_current_user)):
 @app.patch("/api/bills/{bill_id}/paid", response_model=BillOut)
 async def set_bill_paid(bill_id: str, body: dict, me: User = Depends(get_current_user)):
     b = await Bill.get(bill_id)
-    if not b or b.user_id != str(me.id): raise HTTPException(404, "Fatura bulunamadı")
-    paid_status = body.get("paid", False)
-    if paid_status and not b.is_paid:
+    if not b or b.user_id != str(me.id): raise HTTPException(404, "Yok")
+    if body.get("paid") and not b.is_paid:
         b.is_paid = True
         b.paid_at = datetime.now(timezone.utc)
-        tx = Transaction(
-            user_id=str(me.id), title=f"Fatura Ödemesi: {b.title}", 
-            amount=b.amount, type="expense", source="bill", source_id=str(b.id)
-        )
-        await tx.insert()
-    elif not paid_status and b.is_paid:
+        await Transaction(user_id=str(me.id), title=f"Ödeme: {b.title}", amount=b.amount, type="expense", source="bill", source_id=str(b.id)).insert()
+    elif not body.get("paid") and b.is_paid:
         b.is_paid = False
-        b.paid_at = None
         await Transaction.find(Transaction.source == "bill", Transaction.source_id == str(b.id)).delete()
     await b.save()
     return b
-
-@app.delete("/api/bills/{bill_id}")
-async def delete_bill(bill_id: str, me: User = Depends(get_current_user)):
-    b = await Bill.get(bill_id)
-    if not b or b.user_id != str(me.id): raise HTTPException(404, "Fatura bulunamadı")
-    await Transaction.find(Transaction.source == "bill", Transaction.source_id == str(b.id)).delete()
-    await b.delete()
-    return {"ok": True}
