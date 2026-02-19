@@ -19,7 +19,6 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
 
 # --- ÖZEL TİP: ObjectId Hatalarını Çözen Yapı ---
-# Bu kısım loglardaki "Input should be a valid string" hatasını engeller.
 PyObjectId = Annotated[str, BeforeValidator(str)]
 
 # --- MODELLER (Beanie) ---
@@ -71,7 +70,7 @@ class TxCreate(BaseModel):
 
 class TxOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
-    id: PyObjectId = Field(alias="_id") # Kimlik hatası burada çözüldü
+    id: PyObjectId = Field(alias="_id")
     title: str
     amount: float
     type: str
@@ -85,7 +84,7 @@ class BillCreate(BaseModel):
 
 class BillOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
-    id: PyObjectId = Field(alias="_id") # Kimlik hatası burada çözüldü
+    id: PyObjectId = Field(alias="_id")
     title: str
     amount: float
     due_date: Optional[str] = None
@@ -175,18 +174,42 @@ async def create_tx(body: TxCreate, me: User = Depends(get_current_user)):
     return tx
 
 @app.get("/api/transactions", response_model=List[TxOut])
-async def list_tx(me: User = Depends(get_current_user), q: Optional[str] = Query(None), type: Optional[str] = Query(None)):
+async def list_tx(
+    me: User = Depends(get_current_user), 
+    q: Optional[str] = Query(None), 
+    type: Optional[str] = Query(None),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None)
+):
     query = Transaction.find(Transaction.user_id == str(me.id))
     if q: query = query.find({"title": {"$regex": q, "$options": "i"}})
     if type: query = query.find(Transaction.type == type)
+    
+    if start_date or end_date:
+        date_filter = {}
+        try:
+            if start_date:
+                date_filter["$gte"] = datetime.fromisoformat(start_date.replace("Z", "+00:00"))
+            if end_date:
+                date_filter["$lte"] = datetime.fromisoformat(end_date.replace("Z", "+00:00")).replace(hour=23, minute=59, second=59)
+            if date_filter:
+                query = query.find({"created_at": date_filter})
+        except ValueError:
+            pass # Tarih formatı hatalıysa filtreyi atla
+
     return await query.sort(-Transaction.created_at).to_list()
 
 @app.delete("/api/transactions/{tx_id}")
 async def delete_tx(tx_id: str, me: User = Depends(get_current_user)):
-    tx = await Transaction.get(tx_id)
-    if not tx or tx.user_id != str(me.id): raise HTTPException(404, "İşlem bulunamadı")
-    await tx.delete()
-    return {"ok": True}
+    # ID uyuşmazlığı riskine karşı manuel kontrol
+    try:
+        tx = await Transaction.get(tx_id)
+        if not tx or tx.user_id != str(me.id):
+            raise HTTPException(404, "İşlem bulunamadı")
+        await tx.delete()
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(500, f"Silme hatası: {str(e)}")
 
 @app.post("/api/bills", response_model=BillOut)
 async def create_bill(body: BillCreate, me: User = Depends(get_current_user)):
