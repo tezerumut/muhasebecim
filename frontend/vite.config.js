@@ -8,7 +8,8 @@ export default defineConfig({
     VitePWA({
       registerType: "autoUpdate",
       injectRegister: "auto",
-      includeAssets: ["favicon.ico", "apple-touch-icon.png", "masked-icon.svg"],
+      // 🔥 FIX: İkonları zorunlu olmaktan çıkar
+      includeAssets: [],
       manifest: {
         name: "Dijital Esnaf Defteri",
         short_name: "Esnaf Defteri",
@@ -19,38 +20,52 @@ export default defineConfig({
         background_color: "#0b1220",
         theme_color: "#0b1220",
         lang: "tr",
+        // 🔥 FIX: Basit inline ikon (base64)
         icons: [
           {
-            src: "/pwa-192x192.png",
-            sizes: "192x192",
-            type: "image/png",
-          },
-          {
-            src: "/pwa-512x512.png",
+            src: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' fill='%230b1220'/%3E%3Ctext x='50%25' y='50%25' font-family='Arial' font-size='200' fill='%23fff' text-anchor='middle' dominant-baseline='middle'%3E₺%3C/text%3E%3C/svg%3E",
             sizes: "512x512",
-            type: "image/png",
-          },
-          {
-            src: "/pwa-512x512.png",
-            sizes: "512x512",
-            type: "image/png",
-            purpose: "any maskable",
-          },
+            type: "image/svg+xml",
+            purpose: "any maskable"
+          }
         ],
       },
       workbox: {
         cleanupOutdatedCaches: true,
         navigateFallback: "/index.html",
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest}"],
+        // 🔥 FIX: Glob pattern'i daha spesifik yap
+        globPatterns: ["**/*.{js,css,html,ico,svg}"],
+        // 🔥 FIX: Sadece backend API'yi NetworkOnly yap
         runtimeCaching: [
-          // Backend API'yi cache'leme (stale data istemiyoruz)
           {
-            urlPattern: ({ url }) =>
-              url.origin.includes("127.0.0.1:8000") || url.pathname.startsWith("/api/"),
+            urlPattern: ({ url }) => {
+              // Backend API çağrıları
+              return url.hostname.includes("muhasebecim-backend") || 
+                     url.hostname.includes("onrender.com") ||
+                     url.pathname.startsWith("/api/");
+            },
             handler: "NetworkOnly",
           },
+          {
+            // Statik dosyalar için cache
+            urlPattern: /\.(?:js|css|html)$/,
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "static-resources",
+            },
+          },
+        ],
+        // 🔥 FIX: Hata veren dosyaları ignore et
+        navigateFallbackDenylist: [
+          /^\/api\//,
+          /pwa-.*\.png$/,
+          /manifest\.webmanifest$/
         ],
       },
+      // 🔥 FIX: Development'ta PWA'yi devre dışı bırak
+      devOptions: {
+        enabled: false
+      }
     }),
   ],
   server: {
