@@ -38,6 +38,8 @@ class Transaction(Document):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     source: Optional[str] = None
     source_id: Optional[str] = None
+    payment_method: Optional[str] = None
+    description: Optional[str] = None
 
     class Settings:
         name = "transactions"
@@ -67,15 +69,20 @@ class TxCreate(BaseModel):
     title: str = Field(min_length=1)
     amount: float = Field(gt=0)
     type: str = Field(pattern="^(income|expense)$")
+    payment_method: Optional[str] = None
+    description: Optional[str] = None
 
 class TxOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
     id: PyObjectId = Field(alias="_id")
+    _id: PyObjectId = Field(alias="_id") # 🔥 KRİTİK: Frontend'deki t.id hatasını çözer
     title: str
     amount: float
     type: str
     created_at: datetime
     source: Optional[str] = None
+    payment_method: Optional[str] = None
+    description: Optional[str] = None
 
 class BillCreate(BaseModel):
     title: str = Field(min_length=1)
@@ -85,6 +92,7 @@ class BillCreate(BaseModel):
 class BillOut(BaseModel):
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
     id: PyObjectId = Field(alias="_id")
+    _id: PyObjectId = Field(alias="_id") # 🔥 KRİTİK: Faturalar için de eklendi
     title: str
     amount: float
     due_date: Optional[str] = None
@@ -169,7 +177,14 @@ async def get_stats(me: User = Depends(get_current_user)):
 
 @app.post("/api/transactions", response_model=TxOut)
 async def create_tx(body: TxCreate, me: User = Depends(get_current_user)):
-    tx = Transaction(user_id=str(me.id), title=body.title.strip(), amount=body.amount, type=body.type)
+    tx = Transaction(
+        user_id=str(me.id), 
+        title=body.title.strip(), 
+        amount=body.amount, 
+        type=body.type,
+        payment_method=body.payment_method,
+        description=body.description
+    )
     await tx.insert()
     return tx
 
@@ -194,17 +209,16 @@ async def list_tx(
                 date_filter["$lte"] = datetime.fromisoformat(end_date.replace("Z", "+00:00")).replace(hour=23, minute=59, second=59)
             if date_filter:
                 query = query.find({"created_at": date_filter})
-        except ValueError:
-            pass # Tarih formatı hatalıysa filtreyi atla
+        except:
+            pass
 
     return await query.sort(-Transaction.created_at).to_list()
 
 @app.delete("/api/transactions/{tx_id}")
 async def delete_tx(tx_id: str, me: User = Depends(get_current_user)):
-    # ID uyuşmazlığı riskine karşı manuel kontrol
     try:
-        tx = await Transaction.get(tx_id)
-        if not tx or tx.user_id != str(me.id):
+        tx = await Transaction.find_one(Transaction.id == tx_id, Transaction.user_id == str(me.id))
+        if not tx:
             raise HTTPException(404, "İşlem bulunamadı")
         await tx.delete()
         return {"ok": True}
