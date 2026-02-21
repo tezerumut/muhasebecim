@@ -231,46 +231,19 @@ export default function App() {
           <b>İşlemler</b>
           <span style={{fontSize:'0.8rem'}}>{filteredItems.length} Kayıt</span>
         </div>
-        {filteredItems.map(t => {
-          const currentId = t._id || t.id;
-          return (
-            <div key={currentId} style={{ display: 'flex', justifyContent: 'space-between', padding: 15, borderBottom: '1px solid #f8f8f8' }}>
-              <div>
-                <div style={{ fontWeight: 'bold', fontSize: '0.9rem' }}>{(t.title || "").replace('[Ciro] ', '')}</div>
-                <small style={{ color: '#bbb', fontSize: '0.7rem' }}>{new Date(t.created_at).toLocaleDateString('tr-TR')} - {t.payment_method}</small>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <b style={{ color: t.type === 'income' ? '#2e7d32' : '#c62828', fontSize: '1rem' }}>
-                    {t.type === 'income' ? '+' : '-'}{Number(t.amount).toFixed(2)} ₺
-                </b>
-                <br/>
-                <button 
-                  onClick={async (e) => {
-                    const originalText = e.target.innerText;
-                    e.target.innerText = "...";
-                    try {
-                      const res = await fetch(`${API}/api/transactions/${currentId}`, { 
-                        method: "DELETE", 
-                        headers: { "Authorization": `Bearer ${jwt}` } 
-                      });
-                      if(res.ok) {
-                        refreshData(); 
-                      } else {
-                        alert("Silinemedi!");
-                        e.target.innerText = originalText;
-                      }
-                    } catch (err) {
-                      e.target.innerText = originalText;
-                    }
-                  }} 
-                  style={{ background: 'none', border: 'none', color: '#ff4d4d', fontSize: '0.75rem', fontWeight:'bold', textDecoration:'underline', cursor: 'pointer' }}
-                >
-                  Sil
-                </button>
-              </div>
+        {filteredItems.map(t => (
+          <div key={t._id || t.id} style={{ display: 'flex', justifyContent: 'space-between', padding: 15, borderBottom: '1px solid #f8f8f8' }}>
+            <div>
+              <div style={{ fontWeight: 'bold', fontSize: '0.9rem' }}>{(t.title || "").replace('[Ciro] ', '')}</div>
+              <small style={{ color: '#bbb', fontSize: '0.7rem' }}>{new Date(t.created_at).toLocaleDateString('tr-TR')} - {t.payment_method}</small>
             </div>
-          );
-        })}
+            <div style={{ textAlign: 'right' }}>
+              <b style={{ color: t.type === 'income' ? '#2e7d32' : '#c62828', fontSize: '1rem' }}>
+                {t.type === 'income' ? '+' : '-'}{Number(t.amount).toFixed(2)} ₺
+              </b>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
